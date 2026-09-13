@@ -1,20 +1,70 @@
-// Orchestrates the whole loop described in docs/ARCHITECTURE.md.
-//
-// Phase 3: handleCapture just inserts the raw text and returns {type: "saved"}.
-// Phase 5: route through classifyIntent first (SAVE vs QUESTION).
-// Phase 6: on QUESTION —
-//   1. embed the query, run embeddings.topMatches against stored notes
-//   2. if the best match clears SIMILARITY_THRESHOLD, synthesize an answer
-//      grounded only in the retrieved notes -> {source: "memory"}
-//   3. otherwise, fall through to a general-knowledge completion via
-//      lib/providers -> {source: "general"}
-// This is what makes Omni feel like Jarvis instead of two separate tools:
-// the person never says "search my notes" vs "look this up" — one
-// question, answered from whichever source actually has the answer.
-//
-// const SIMILARITY_THRESHOLD = 0.75; // tune once Phase 4/6 have real data
-//
-// import type { CaptureResult } from "./types";
-// export async function handleCapture(text: string): Promise<CaptureResult> { ... }
+import type { CaptureResult } from "./types";
+import { db } from "./db";
+import { filterInput } from "./filter";
+import { classifyIntent } from "./intent";
+import { embed, topMatches, embedAndStore } from "./embeddings";
+import { getProvider } from "./providers/types";
 
-export {};
+const SIMILARITY_THRESHOLD = 0.3;
+
+const RECALL_PROMPT = `You are a personal memory assistant. The user asked a question and relevant notes from their personal memory were found. Answer the question using ONLY the information in the notes below. Be concise and direct. If the notes don't contain enough information to fully answer, say what you can and note what's missing.
+
+Notes:
+{NOTES}
+
+Question: "{QUESTION}"
+
+Answer:`;
+
+/**
+ * The single entry point for all omni-bar input. Runs the full pipeline:
+ * pre-filter → intent classification → save or answer.
+ */
+export async function handleCapture(text: string): Promise<CaptureResult> {
+  const check = filterInput(text);
+  if (!check.pass) {
+    return { type: "filtered", reason: check.reason };
+  }
+
+  const intent = await classifyIntent(text);
+
+  if (intent === "DISCARD") {
+    return { type: "filtered", reason: "Nothing to save." };
+  }
+
+  if (intent === "SAVE") {
+    const trimmed = text.trim();
+    const info = db
+      .prepare("INSERT INTO notes (content, created_at) VALUES (?, datetime('now'))")
+      .run(trimmed);
+    const noteId = Number(info.lastInsertRowid);
+    await embedAndStore(noteId, trimmed);
+    return { type: "saved" };
+  }
+
+  // QUESTION — search memory, synthesize an answer if relevant notes exist
+  const queryVec = await embed(text);
+  const matches = topMatches(queryVec, 5);
+  const relevant = matches.filter((m) => m.score >= SIMILARITY_THRESHOLD);
+
+  if (relevant.length > 0) {
+    const notesBlock = relevant
+      .map((n, i) => `${i + 1}. ${n.content}`)
+      .join("\n");
+    const prompt = RECALL_PROMPT
+      .replace("{NOTES}", notesBlock)
+      .replace("{QUESTION}", text.replace(/"/g, '\\"'));
+
+    const provider = getProvider("anthropic");
+    const answer = await provider.complete(prompt);
+    return { type: "answer", text: answer.trim(), source: "memory" };
+  }
+
+  // No relevant notes — return empty for now. Phase 7 adds the
+  // general-knowledge fallback so this path gives a real answer.
+  return {
+    type: "answer",
+    text: "Nothing stored about that, and general-knowledge fallback isn't wired yet.",
+    source: "general",
+  };
+}
