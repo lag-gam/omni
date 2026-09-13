@@ -1,4 +1,5 @@
 import { db } from "../lib/db";
+import { embedAndStore } from "../lib/embeddings";
 
 const seeds = [
   "The melting point of gallium is 29.76 °C — it melts in your hand.",
@@ -23,7 +24,18 @@ const insertAll = db.transaction(() => {
 
 insertAll();
 
+async function embedAll() {
+  const rows = db
+    .prepare("SELECT id, content FROM notes WHERE embedding IS NULL")
+    .all() as { id: number; content: string }[];
+  for (const row of rows) {
+    await embedAndStore(row.id, row.content);
+  }
+  console.log(`Embedded ${rows.length} notes.`);
+}
+
 const count = db.prepare("SELECT COUNT(*) as n FROM notes").get() as {
   n: number;
 };
 console.log(`Seeded ${count.n} notes.`);
+embedAll();
