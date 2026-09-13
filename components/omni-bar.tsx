@@ -1,17 +1,28 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Input } from "@/components/ui/input";
 import type { CaptureResult } from "@/lib/types";
 
+type Response = {
+  text: string;
+  kind: "saved" | "answer-memory" | "answer-general" | "filtered" | "error";
+};
+
 /**
- * The entire capture surface. One field, one line of status underneath.
+ * The entire capture surface. One field, one unified response area.
  * No mode switch, no save/ask buttons — see docs/ARCHITECTURE.md for why.
+ *
+ * Every result — save confirmation, memory-grounded answer, general-knowledge
+ * answer, filter rejection — renders in the same spot with the same styling.
+ * The only distinction is a subtle "(from your notes)" or "(general knowledge)"
+ * tag on answers, communicated in words, not colour.
  */
 export function OmniBar() {
   const [value, setValue] = useState("");
-  const [status, setStatus] = useState<string | null>(null);
+  const [response, setResponse] = useState<Response | null>(null);
   const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -19,7 +30,7 @@ export function OmniBar() {
     if (!text || busy) return;
 
     setBusy(true);
-    setStatus(null);
+    setResponse(null);
     setValue("");
 
     try {
@@ -32,26 +43,38 @@ export function OmniBar() {
 
       switch (result.type) {
         case "saved":
-          setStatus("Saved.");
+          setResponse({ text: "Saved.", kind: "saved" });
           break;
         case "filtered":
-          setStatus(result.reason);
+          setResponse({ text: result.reason, kind: "filtered" });
           break;
         case "answer":
-          setStatus(result.text);
+          setResponse({
+            text: result.text,
+            kind: result.source === "memory" ? "answer-memory" : "answer-general",
+          });
           break;
       }
     } catch {
-      setStatus("Something went wrong.");
+      setResponse({ text: "Something went wrong.", kind: "error" });
     } finally {
       setBusy(false);
+      inputRef.current?.focus();
     }
   }
 
+  const sourceTag =
+    response?.kind === "answer-memory"
+      ? "(from your notes)"
+      : response?.kind === "answer-general"
+        ? "(general knowledge)"
+        : null;
+
   return (
-    <div className="flex w-full max-w-lg flex-col gap-2">
+    <div className="flex w-full max-w-lg flex-col gap-3">
       <form onSubmit={handleSubmit}>
         <Input
+          ref={inputRef}
           autoFocus
           value={value}
           onChange={(e) => setValue(e.target.value)}
@@ -60,9 +83,25 @@ export function OmniBar() {
           aria-label="Omni input"
         />
       </form>
-      <p className="min-h-[1.25rem] px-1 text-sm text-muted-foreground">
-        {busy ? "Thinking\u2026" : status}
-      </p>
+
+      <div
+        className="min-h-[1.5rem] px-1 text-sm text-foreground/80"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {busy ? (
+          <span className="text-muted-foreground">Thinking\u2026</span>
+        ) : response ? (
+          <div className="flex flex-col gap-1">
+            <p className="whitespace-pre-wrap leading-relaxed">
+              {response.text}
+            </p>
+            {sourceTag && (
+              <p className="text-xs text-muted-foreground">{sourceTag}</p>
+            )}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
