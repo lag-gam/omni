@@ -6,11 +6,13 @@ export type Note = {
   tags: string[];
 };
 
-// The classifier only ever picks between these two — see lib/intent.ts.
+// DISCARD is resolved locally by lib/filter.ts (fast, no API call) and
+// later also by the intent classifier (Phase 5) for borderline cases.
 // Whether a QUESTION gets answered from memory or general knowledge is
-// decided downstream, in lib/memory.ts, not by the classifier.
-export type Intent = "SAVE" | "QUESTION";
+// decided downstream in lib/memory.ts, not by the classifier.
+export type Intent = "SAVE" | "QUESTION" | "DISCARD";
 
 export type CaptureResult =
   | { type: "saved" }
-  | { type: "answer"; text: string; source: "memory" | "general" };
+  | { type: "answer"; text: string; source: "memory" | "general" }
+  | { type: "filtered"; reason: string };
