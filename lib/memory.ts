@@ -60,11 +60,11 @@ export async function handleCapture(text: string): Promise<CaptureResult> {
     return { type: "answer", text: answer.trim(), source: "memory" };
   }
 
-  // No relevant notes — return empty for now. Phase 7 adds the
-  // general-knowledge fallback so this path gives a real answer.
-  return {
-    type: "answer",
-    text: "Nothing stored about that, and general-knowledge fallback isn't wired yet.",
-    source: "general",
-  };
+  // No relevant notes — fall through to general knowledge
+  const gkProvider = getProvider(
+    process.env.GK_PROVIDER as "anthropic" | "huggingface" | undefined ??
+      undefined
+  );
+  const gkAnswer = await gkProvider.complete(text);
+  return { type: "answer", text: gkAnswer.trim(), source: "general" };
 }

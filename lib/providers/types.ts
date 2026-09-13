@@ -1,4 +1,5 @@
 import { anthropicProvider } from "./anthropic";
+import { huggingfaceProvider } from "./huggingface";
 
 export interface ModelProvider {
   /** One-shot text completion. Keep prompts self-contained — no provider
@@ -9,15 +10,16 @@ export interface ModelProvider {
 export type ProviderName = "anthropic" | "huggingface";
 
 /**
- * Return a provider by name. Defaults to Anthropic. HuggingFace provider
- * is wired in Phase 7 — until then, everything uses Anthropic.
+ * Return a provider by name. Defaults to Anthropic. Call sites can
+ * request a specific provider — e.g. memory.ts uses "anthropic" for
+ * intent/recall and optionally "huggingface" for general-knowledge.
  */
 export function getProvider(name?: ProviderName): ModelProvider {
   const selected =
     name ?? (process.env.MODEL_PROVIDER as ProviderName) ?? "anthropic";
   switch (selected) {
     case "huggingface":
-      throw new Error("HuggingFace provider not yet wired — coming in Phase 7");
+      return huggingfaceProvider;
     case "anthropic":
     default:
       return anthropicProvider;
