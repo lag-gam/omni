@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleCapture } from "@/lib/memory";
 
+export const dynamic = "force-dynamic";
+
 // The one endpoint the omni-bar calls. Takes { text }, delegates the full
 // pipeline (filter → classify → save/answer) to lib/memory.ts.
 export async function POST(req: NextRequest) {

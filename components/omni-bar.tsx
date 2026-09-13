@@ -78,9 +78,15 @@ export function OmniBar() {
           autoFocus
           value={value}
           onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              setValue("");
+              setResponse(null);
+            }
+          }}
           placeholder="Say or type anything"
           disabled={busy}
-          aria-label="Omni input"
+          aria-label="Omni input — press Enter to submit, Escape to clear"
         />
       </form>
 
