@@ -10,6 +10,10 @@ way you'd talk to a person rather than operate a form.
 - **One input.** No "save" vs "ask" toggle. Intent is inferred, not selected.
 - **Local-first memory.** Notes live in SQLite on your machine; nothing leaves
   it except the model calls needed to classify intent and search.
+- **Answers, not just recall.** Ask something with nothing stored about it —
+  "what's the formula for X" — and Omni falls back to general knowledge
+  instead of coming up empty. Model choice per call is swappable between
+  Claude and an open Hugging Face model.
 - **Monochrome UI.** Black, white, and the grays between. One type family.
   [shadcn/ui](https://ui.shadcn.com) primitives only, no icon soup.
 
@@ -30,4 +34,4 @@ the intent/recall layer lands — the UI shell runs without one.
 
 ## Stack
 
-Next.js (App Router) · TypeScript · Tailwind · shadcn/ui · SQLite (better-sqlite3) · Claude API for intent classification and recall synthesis
+Next.js (App Router) · TypeScript · Tailwind · shadcn/ui · SQLite (better-sqlite3) · Claude API by default for intent classification and recall, with a swappable Hugging Face open-model provider for general-knowledge answers (`MODEL_PROVIDER=huggingface`)

@@ -8,14 +8,28 @@ There is one input and one loop:
 you type or dictate
         │
         ▼
-  intent router  ──►  SAVE   ──►  store + embed  ──►  quiet confirmation
+  intent router (SAVE / QUESTION)
         │
-        └────────►  RECALL  ──►  semantic search + synthesize  ──►  answer
+        ├──► SAVE ─────────────────────────────► store + embed ─► quiet confirmation
+        │
+        └──► QUESTION ─► search your notes ─┬─► good match  ─► answer grounded
+                                             │                   in your notes
+                                             │                   (source: memory)
+                                             └─► no good match ─► general-knowledge
+                                                                  model completion
+                                                                  (source: general)
 ```
 
-The router is what makes this feel like Siri instead of a notes app: the
-person never says which mode they're in. That means the router has to be
-right almost all the time, so it's the piece worth the most iteration.
+The router only ever picks SAVE vs QUESTION — that's the one decision that
+has to feel invisible, like Siri. What kind of answer a QUESTION gets
+(your own notes vs. general knowledge) is decided one layer down, by
+whether anything in memory is actually relevant. This is the Jarvis part:
+you ask "what's the formula for X" mid-research the same way you'd ask
+"what did I decide about the enclosure material" — same input, same lack
+of ceremony, Omni sorts out where the answer comes from.
+
+The router is the piece worth the most iteration, since it's what makes
+this feel ambient instead of like operating a form.
 
 ## Components
 
@@ -26,18 +40,33 @@ Wispr Flow's dictation-stop) is the only action. The response — a
 confirmation, or a synthesized answer — replaces the status line in place.
 
 **`lib/intent.ts`**
-Given the raw input, classifies it as `SAVE`, `RECALL`, or `CHAT` (small talk
-/ commands that are neither). Phase 5 in the roadmap. Starts as a single
-Claude call with a few-shot prompt; the main failure mode to design against
-is a statement that's phrased like a question ("gotta remember to call the
-dentist tomorrow") — bias the prompt toward SAVE when ambiguous, since a
-false RECALL (answering nothing) is more annoying than a false SAVE (storing
-a stray line).
+Given the raw input, classifies it as `SAVE` or `QUESTION` — nothing more.
+Phase 5 in the roadmap. Starts as a single model call with a few-shot
+prompt; the main failure mode to design against is a statement that's
+phrased like a question ("gotta remember to call the dentist tomorrow") —
+bias the prompt toward SAVE when ambiguous, since an unanswerable QUESTION
+is more annoying than a stray line saved that didn't need to be.
 
 **`lib/memory.ts`**
-Orchestrates both paths: on SAVE, writes the row and kicks off embedding; on
-RECALL, runs retrieval and asks Claude to answer using only the retrieved
-notes, saying plainly when nothing relevant is stored rather than guessing.
+Orchestrates every path. `SAVE` writes the row and kicks off embedding.
+`QUESTION` runs retrieval first: if a stored note clears a similarity
+threshold, it asks the model to answer using only the retrieved notes
+(`source: "memory"`), saying plainly when nothing relevant is stored rather
+than guessing. If nothing clears the threshold, it falls through to a
+general-knowledge completion instead (`source: "general"`) — this is the
+Phase 6b addition that lets Omni answer things like "what's the chemical
+formula for X" without those ever being mistaken for something you told it.
+
+**`lib/providers/`**
+A small interface (`ModelProvider.complete(prompt)`) so each call site —
+intent classification, memory-grounded recall, general-knowledge fallback —
+can run on whichever model fits, chosen by an env var
+(`MODEL_PROVIDER=anthropic|huggingface`), not hardcoded. `anthropic.ts` is
+the default. `huggingface.ts` calls Hugging Face's hosted Inference API for
+an open instruct model (Llama, Mistral, Qwen, etc.) — a reasonable choice
+specifically for the general-knowledge fallback, since plain factual Q&A
+doesn't need a frontier model and it keeps that path cheap. The two paths
+don't have to use the same provider.
 
 **`lib/embeddings.ts`**
 Generates an embedding per note on save and does cosine-similarity search at
