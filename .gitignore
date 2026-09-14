@@ -4,4 +4,6 @@ out/
 *.db
 .env
 .env.local
+omni.config.json
+secrets/
 .DS_Store

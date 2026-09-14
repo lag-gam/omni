@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "google": {
+      "command": "bunx",
+      "args": ["--bun", "gmcp"],
+      "requires": ["GOOGLE_CREDENTIALS_PATH", "GOOGLE_TOKEN_PATH"],
+      "env": {
+        "GOOGLE_CREDENTIALS_PATH": "${GOOGLE_CREDENTIALS_PATH}",
+        "GOOGLE_TOKEN_PATH": "${GOOGLE_TOKEN_PATH}",
+        "GOOGLE_SCOPES": "gmail.readonly,gmail.send,calendar.events"
+      }
+    },
+    "notion": {
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "requires": ["NOTION_TOKEN"],
+      "env": {
+        "NOTION_TOKEN": "${NOTION_TOKEN}"
+      }
+    },
+    "imessage": {
+      "command": "npx",
+      "args": ["-y", "imessage-mcp"]
+    }
+  }
+}
