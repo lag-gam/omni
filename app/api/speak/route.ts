@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { end, tryBegin } from "@/lib/server-lock";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,53 +24,85 @@ export async function POST(req: NextRequest) {
   const spoken = text.replace(/\s+/g, " ").trim().slice(0, 2000);
   if (!spoken) return new Response(null, { status: 204 });
 
-  const headers = {
-    "xi-api-key": key,
-    "Content-Type": "application/json",
-    Accept: "audio/mpeg",
-  };
+  if (!tryBegin("__omniSpeakBusy")) {
+    return new Response(null, { status: 429 });
+  }
 
-  // Conversational v3 is a dialogue model. Fall back to classic v3 TTS
-  // if this account/route does not accept the dialogue endpoint.
-  let upstream = await fetch(
-    "https://api.elevenlabs.io/v1/text-to-dialogue/stream",
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        inputs: [{ text: spoken, voice_id: VOICE }],
-        model_id: MODEL,
-      }),
-    }
-  );
+  try {
+    const headers = {
+      "xi-api-key": key,
+      "Content-Type": "application/json",
+      Accept: "audio/mpeg",
+    };
 
-  if (!upstream.ok) {
-    upstream = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${VOICE}/stream`,
+    let upstream = await fetch(
+      "https://api.elevenlabs.io/v1/text-to-dialogue/stream",
       {
         method: "POST",
         headers,
         body: JSON.stringify({
-          text: spoken,
-          model_id:
-            MODEL === "eleven_v3_conversational" ? "eleven_v3" : MODEL,
+          inputs: [{ text: spoken, voice_id: VOICE }],
+          model_id: MODEL,
         }),
       }
     );
-  }
 
-  if (!upstream.ok || !upstream.body) {
-    const detail = await upstream.text().catch(() => "");
-    return Response.json(
-      { error: detail || `ElevenLabs ${upstream.status}` },
-      { status: upstream.status }
-    );
-  }
+    if (!upstream.ok) {
+      upstream = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${VOICE}/stream`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            text: spoken,
+            model_id:
+              MODEL === "eleven_v3_conversational" ? "eleven_v3" : MODEL,
+          }),
+        }
+      );
+    }
 
-  return new Response(upstream.body, {
-    headers: {
-      "Content-Type": "audio/mpeg",
-      "Cache-Control": "no-store",
-    },
-  });
+    if (!upstream.ok || !upstream.body) {
+      const detail = await upstream.text().catch(() => "");
+      const parsed = parseElevenError(detail);
+      if (parsed.code === "quota_exceeded") {
+        return Response.json(
+          {
+            error: "ElevenLabs is out of credits. Using the Mac voice.",
+            code: "quota_exceeded",
+          },
+          { status: 402 }
+        );
+      }
+      return Response.json(
+        { error: parsed.message || `ElevenLabs ${upstream.status}` },
+        { status: upstream.status }
+      );
+    }
+
+    const bytes = await upstream.arrayBuffer();
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": "audio/mpeg",
+        "Cache-Control": "no-store",
+      },
+    });
+  } finally {
+    end("__omniSpeakBusy");
+  }
+}
+
+function parseElevenError(raw: string): { code?: string; message: string } {
+  try {
+    const body = JSON.parse(raw) as {
+      detail?: { code?: string; message?: string } | string;
+    };
+    if (typeof body.detail === "string") return { message: body.detail };
+    return {
+      code: body.detail?.code,
+      message: body.detail?.message || raw,
+    };
+  } catch {
+    return { message: raw };
+  }
 }

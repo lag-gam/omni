@@ -1,22 +1,41 @@
 {
+  "n8n": {
+    "enabled": false,
+    "baseUrl": "${N8N_BASE_URL}",
+    "apiKey": "${N8N_API_KEY}",
+    "mcpUrl": "${N8N_MCP_URL}",
+    "webhooks": [
+      {
+        "name": "gmail_search",
+        "path": "jarvis-gmail-search",
+        "description": "Search Gmail. Pass query as Gmail search syntax.",
+        "schema": {
+          "type": "object",
+          "properties": { "query": { "type": "string" } },
+          "required": ["query"]
+        }
+      },
+      {
+        "name": "calendar_list",
+        "path": "jarvis-calendar",
+        "description": "List upcoming Google Calendar events.",
+        "schema": {
+          "type": "object",
+          "properties": { "from": { "type": "string" }, "to": { "type": "string" } }
+        }
+      }
+    ]
+  },
   "mcpServers": {
     "google": {
       "command": "bunx",
       "args": ["--bun", "gmcp"],
-      "requires": ["GOOGLE_CREDENTIALS_PATH", "GOOGLE_TOKEN_PATH"],
       "env": {
         "GOOGLE_CREDENTIALS_PATH": "${GOOGLE_CREDENTIALS_PATH}",
         "GOOGLE_TOKEN_PATH": "${GOOGLE_TOKEN_PATH}",
         "GOOGLE_SCOPES": "gmail.readonly,gmail.send,calendar.events"
-      }
-    },
-    "notion": {
-      "command": "npx",
-      "args": ["-y", "@notionhq/notion-mcp-server"],
-      "requires": ["NOTION_TOKEN"],
-      "env": {
-        "NOTION_TOKEN": "${NOTION_TOKEN}"
-      }
+      },
+      "requires": ["GOOGLE_CREDENTIALS_PATH", "GOOGLE_TOKEN_PATH"]
     },
     "imessage": {
       "command": "npx",

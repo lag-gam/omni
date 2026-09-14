@@ -1,44 +1,38 @@
 # Personal connectors
 
-Omni talks to Gmail, Google Calendar, Notion, and iMessage through MCP
-servers. You authorize them once; Omni does not store your mail or messages
-itself.
+Gmail and Calendar use the local Google MCP by default. iMessage stays local
+on this Mac, and notes stay in Omni. n8n is optional and is never contacted
+unless it is explicitly enabled.
 
 Run `npm run setup:mcp` anytime to see what's still missing.
 
-## 1. Gmail + Google Calendar (one Google login)
+## 1. Google MCP (default)
 
-1. Open [Google Cloud Console](https://console.cloud.google.com).
-2. Create a project (or pick one).
-3. Enable **Gmail API** and **Google Calendar API**.
-4. **APIs & Services → OAuth consent screen**
-   - User type: External
-   - Add yourself as a test user
-5. **APIs & Services → Credentials → Create credentials → OAuth client ID**
-   - Application type: **Desktop app**
-6. Download the JSON and save it as `secrets/google-oauth.json`.
-7. From the Omni folder:
+Set `GOOGLE_CREDENTIALS_PATH` and `GOOGLE_TOKEN_PATH` in `.env.local`, then
+run:
 
 ```bash
 npm run auth:google
 ```
 
-Sign in and allow Gmail + Calendar. A token is written to
-`secrets/google-token.json` (gitignored).
+Omni uses this MCP for Gmail and Calendar without requiring n8n.
 
-## 2. Notion
+## 2. n8n (optional override)
 
-1. Open [Notion integrations](https://www.notion.so/my-integrations).
-2. **New integration** → copy the Internal Integration Secret (`ntn_…`).
-3. Add to `.env.local`:
+Omni does not start or contact n8n by default. When the integration is ready,
+set `OMNI_N8N_ENABLED=true` in `.env.local` (or set `"enabled": true` in
+`omni.config.json`) and restart Omni.
 
-```
-NOTION_TOKEN=ntn_…
-```
+When enabled, matching n8n workflows take priority. Failed or unavailable
+workflows fall back to Google MCP.
 
-4. In Notion, open every page or database Omni should read.
-   **⋯ → Connections →** select the integration.
-   Tokens cannot see a page until you share it.
+To configure it later:
+
+1. Run n8n ([desktop](https://n8n.io/download) or `npx n8n`).
+2. Create an API key under **Settings → n8n API**.
+3. Set `N8N_BASE_URL` and `N8N_API_KEY` in `.env.local`.
+4. Build and activate the webhook workflows from `omni.config.json`.
+5. Enable the flag only after those workflows are ready.
 
 ## 3. iMessage
 
@@ -60,7 +54,7 @@ once so this Mac has a local copy of the history.
 ## 4. Restart Omni
 
 ```bash
-npm run dev
+npm run desktop
 ```
 
 Then try:

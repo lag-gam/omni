@@ -2,6 +2,7 @@ node_modules/
 .next/
 out/
 *.db
+*.db-*
 .env
 .env.local
 omni.config.json

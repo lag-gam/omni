@@ -13,5 +13,7 @@ export function localContextBlock(at: Date = new Date()): string {
     timeZoneName: "short",
   }).format(at);
 
-  return `Current local time: ${stamp} (${timezone})`;
+  const iso = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+
+  return `Current local time: ${stamp} (${timezone}). Today's date for tools: ${iso}. For iMessage "today", set date_from=${iso} and omit date_to. Filter people with contact=their name, not query.`;
 }

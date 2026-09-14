@@ -41,54 +41,60 @@ function line(ok: boolean, label: string, detail: string) {
 }
 
 function status() {
+  const n8nEnabled = /^(1|true|yes|on)$/i.test(
+    process.env.OMNI_N8N_ENABLED?.trim() ?? ""
+  );
+  const n8nUrl = process.env.N8N_BASE_URL?.trim() ?? "";
+  const n8nKey = process.env.N8N_API_KEY?.trim() ?? "";
+  const n8nMcp = process.env.N8N_MCP_URL?.trim() ?? "";
+
   console.log("\nOmni connectors\n");
   line(
     existsSync(creds),
-    "Gmail + Calendar  Google OAuth client JSON",
-    existsSync(creds) ? creds : `put downloaded client here: ${creds}`
+    "Gmail + Calendar  (default MCP) Google OAuth JSON",
+    existsSync(creds) ? creds : "required for Gmail and Calendar"
   );
   line(
     existsSync(token),
-    "Gmail + Calendar  signed-in token",
-    existsSync(token) ? token : "run: npm run auth:google"
+    "Gmail + Calendar  (default MCP) signed-in token",
+    existsSync(token) ? token : "run npm run auth:google"
   );
   line(
     notion.startsWith("ntn_") || notion.startsWith("secret_"),
-    "Notion            integration token",
-    notion ? "NOTION_TOKEN is set" : "add NOTION_TOKEN=ntn_… to .env.local"
+    "Notion            (legacy MCP) integration token",
+    notion ? "NOTION_TOKEN is set" : "optional if n8n handles Notion"
   );
   line(true, "iMessage          local chat.db", "needs Full Disk Access on Terminal");
+  line(
+    Boolean(n8nEnabled && n8nUrl && n8nKey),
+    "n8n              optional workflow override",
+    !n8nEnabled
+      ? "off; Omni will not contact it"
+      : n8nUrl && n8nKey
+      ? `${n8nUrl}${n8nMcp ? " + MCP" : ""}`
+      : "enabled but missing N8N_BASE_URL or N8N_API_KEY"
+  );
   console.log(`
-Next steps (do these in order):
+Next steps:
 
-1) Gmail + Google Calendar
-   • https://console.cloud.google.com → new project (or pick one)
-   • Enable "Gmail API" and "Google Calendar API"
-   • APIs & Services → OAuth consent screen → External → your email as test user
-   • APIs & Services → Credentials → Create credentials → OAuth client ID
-     Application type: Desktop app
-   • Download the JSON → save as:
-     ${creds}
-   • Then:  npm run auth:google
-     Browser opens, sign in, allow Gmail + Calendar.
+1) Google MCP (default)
+   • Set GOOGLE_CREDENTIALS_PATH and GOOGLE_TOKEN_PATH
+   • Run: npm run auth:google
 
-2) Notion
-   • https://www.notion.so/my-integrations → New integration
-   • Copy the Internal Integration Secret
-   • Put it in .env.local as  NOTION_TOKEN=ntn_…
-   • In Notion, open each page/database Omni should see → ⋯ → Connections → your integration
-
-3) iMessage (this Mac only)
+2) iMessage (this Mac only)
    • System Settings → Privacy & Security → Full Disk Access
    • Enable Terminal (and Electron if you use npm run desktop)
    • Quit and reopen Terminal, then:  npx -y imessage-mcp doctor
 
-4) Restart Omni
-   • Stop npm run dev, start it again so it picks up tokens
+3) Restart Omni
+   • npm run desktop
    • Try: "what's on my calendar tomorrow"
            "any unread mail from …"
-           "search notion for …"
            "what did I text …"
+
+4) Optional n8n (later)
+   • Configure and activate the workflows first
+   • Only then set OMNI_N8N_ENABLED=true and restart Omni
 `);
 }
 
