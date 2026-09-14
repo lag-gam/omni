@@ -1,10 +1,10 @@
-import type { ModelProvider } from "./types";
+import type { CompleteOptions, ModelProvider } from "./types";
 
 const HF_MODEL =
   process.env.HF_MODEL ?? "meta-llama/Llama-3.3-70B-Instruct";
 
 export const huggingfaceProvider: ModelProvider = {
-  async complete(prompt: string) {
+  async complete(prompt: string, options?: CompleteOptions) {
     const res = await fetch(
       `https://router.huggingface.co/hf-inference/models/${HF_MODEL}/v1/chat/completions`,
       {
@@ -16,7 +16,7 @@ export const huggingfaceProvider: ModelProvider = {
         body: JSON.stringify({
           model: HF_MODEL,
           messages: [{ role: "user", content: prompt }],
-          max_tokens: 512,
+          max_tokens: options?.maxTokens ?? 512,
         }),
       }
     );

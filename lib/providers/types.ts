@@ -1,10 +1,15 @@
 import { anthropicProvider } from "./anthropic";
 import { huggingfaceProvider } from "./huggingface";
 
+export type CompleteOptions = {
+  model?: string;
+  maxTokens?: number;
+};
+
 export interface ModelProvider {
   /** One-shot text completion. Keep prompts self-contained — no provider
    *  here is expected to hold conversation state between calls. */
-  complete(prompt: string): Promise<string>;
+  complete(prompt: string, options?: CompleteOptions): Promise<string>;
 }
 
 export type ProviderName = "anthropic" | "huggingface";
