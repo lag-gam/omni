@@ -2,35 +2,30 @@
 
 import { useRef, useState } from "react";
 import { Input } from "@/components/ui/input";
-import type { CaptureResult } from "@/lib/types";
+import { VoiceViz } from "@/components/voice-viz";
+import { createSpeaker } from "@/lib/speech";
+import type { StreamEvent } from "@/lib/types";
 
 type Response = {
   text: string;
-  kind: "saved" | "answer-memory" | "answer-general" | "filtered" | "error";
+  kind: "saved" | "answer" | "filtered" | "error" | "status";
 };
 
-/**
- * The entire capture surface. One field, one unified response area.
- * No mode switch, no save/ask buttons — see docs/ARCHITECTURE.md for why.
- *
- * Every result — save confirmation, memory-grounded answer, general-knowledge
- * answer, filter rejection — renders in the same spot with the same styling.
- * The only distinction is a subtle "(from your notes)" or "(general knowledge)"
- * tag on answers, communicated in words, not colour.
- */
 export function OmniBar() {
   const [value, setValue] = useState("");
   const [response, setResponse] = useState<Response | null>(null);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const speakerRef = useRef(createSpeaker());
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const text = value.trim();
     if (!text || busy) return;
 
+    speakerRef.current.stop();
     setBusy(true);
-    setResponse(null);
+    setResponse({ text: "Listening…", kind: "status" });
     setValue("");
 
     try {
@@ -39,39 +34,64 @@ export function OmniBar() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      const result: CaptureResult = await res.json();
+      if (!res.body) throw new Error("No stream");
 
-      switch (result.type) {
-        case "saved":
-          setResponse({ text: "Saved.", kind: "saved" });
-          break;
-        case "filtered":
-          setResponse({ text: result.reason, kind: "filtered" });
-          break;
-        case "answer":
-          setResponse({
-            text: result.text,
-            kind: result.source === "memory" ? "answer-memory" : "answer-general",
-          });
-          break;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let spoken = "";
+
+      while (true) {
+        const { value: chunk, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(chunk, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line) as StreamEvent;
+
+          if (event.type === "status") {
+            setResponse({ text: event.text, kind: "status" });
+          } else if (event.type === "token") {
+            spoken += event.text;
+            setResponse({ text: spoken, kind: "answer" });
+            speakerRef.current.push(event.text);
+          } else if (event.type === "done") {
+            if (event.result.type === "saved") {
+              setResponse({ text: "Saved.", kind: "saved" });
+              speakerRef.current.stop();
+              speakerRef.current.push("Saved.");
+              speakerRef.current.flush();
+            } else if (event.result.type === "filtered") {
+              setResponse({ text: event.result.reason, kind: "filtered" });
+              speakerRef.current.stop();
+              speakerRef.current.push(event.result.reason);
+              speakerRef.current.flush();
+            } else {
+              setResponse({ text: event.result.text || spoken, kind: "answer" });
+              speakerRef.current.flush();
+            }
+          } else if (event.type === "error") {
+            setResponse({ text: event.text, kind: "error" });
+            speakerRef.current.stop();
+          }
+        }
       }
     } catch {
       setResponse({ text: "Something went wrong.", kind: "error" });
+      speakerRef.current.stop();
     } finally {
       setBusy(false);
       inputRef.current?.focus();
     }
   }
 
-  const sourceTag =
-    response?.kind === "answer-memory"
-      ? "(from your notes)"
-      : response?.kind === "answer-general"
-        ? "(general knowledge)"
-        : null;
-
   return (
-    <div className="flex w-full max-w-lg flex-col gap-3">
+    <div className="flex w-full max-w-lg flex-col items-stretch gap-5">
+      <VoiceViz />
+
       <form onSubmit={handleSubmit}>
         <Input
           ref={inputRef}
@@ -82,30 +102,22 @@ export function OmniBar() {
             if (e.key === "Escape") {
               setValue("");
               setResponse(null);
+              speakerRef.current.stop();
             }
           }}
-          placeholder="Say or type anything"
+          placeholder="Say anything"
           disabled={busy}
           aria-label="Omni input — press Enter to submit, Escape to clear"
         />
       </form>
 
       <div
-        className="min-h-[1.5rem] px-1 text-sm text-foreground/80"
+        className="min-h-[1.5rem] px-2 text-[15px] leading-relaxed text-foreground/70"
         aria-live="polite"
         aria-atomic="true"
       >
-        {busy ? (
-          <span className="text-muted-foreground">Thinking\u2026</span>
-        ) : response ? (
-          <div className="flex flex-col gap-1">
-            <p className="whitespace-pre-wrap leading-relaxed">
-              {response.text}
-            </p>
-            {sourceTag && (
-              <p className="text-xs text-muted-foreground">{sourceTag}</p>
-            )}
-          </div>
+        {response ? (
+          <p className="whitespace-pre-wrap">{response.text}</p>
         ) : null}
       </div>
     </div>

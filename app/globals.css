@@ -32,13 +32,29 @@
 
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: "cv11", "ss01";
+    font-feature-settings: "ss01", "cv11";
+    letter-spacing: -0.02em;
   }
 }
 
 /* Reduced motion: disable transitions and animations for users who
    prefer it. Applied globally so individual components don't need to
    remember. */
+html.omni-desktop,
+html.omni-desktop body {
+  background: hsl(var(--background));
+  overflow: hidden;
+}
+
+html.omni-desktop main {
+  min-height: 100vh;
+  padding: 1.25rem 1.5rem 1rem;
+}
+
+html.omni-desktop nav {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
