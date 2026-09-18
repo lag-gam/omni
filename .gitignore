@@ -8,3 +8,4 @@ out/
 omni.config.json
 secrets/
 .DS_Store
+tsconfig.tsbuildinfo

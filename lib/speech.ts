@@ -1,6 +1,8 @@
 type SpeakListener = (speaking: boolean) => void;
 type UtteranceListener = (text: string) => void;
 
+export const SPEAK_RATE = 1.2;
+
 let ctx: AudioContext | null = null;
 let analyser: AnalyserNode | null = null;
 let output: GainNode | null = null;
@@ -88,6 +90,7 @@ async function playMp3(data: ArrayBuffer, token: number) {
   await new Promise<void>((resolve) => {
     const src = graph.ctx.createBufferSource();
     src.buffer = buffer;
+    src.playbackRate.value = SPEAK_RATE;
     src.connect(graph.output);
     currentSource = src;
     playing = true;
@@ -173,7 +176,7 @@ async function speakLocal(text: string, token: number): Promise<void> {
     }
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = "en-GB";
-    utter.rate = 0.98;
+    utter.rate = SPEAK_RATE;
     utter.pitch = 0.95;
     if (voice) utter.voice = voice;
     utter.onend = () => {

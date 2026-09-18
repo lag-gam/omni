@@ -21,6 +21,17 @@ export type HudCard = {
   body: string;
 };
 
+export type ClarificationReason =
+  | "missing_detail"
+  | "no_results"
+  | "ambiguous_results";
+
+export type ClarificationResult = {
+  type: "clarify";
+  question: string;
+  reason: ClarificationReason;
+};
+
 export type CaptureResult =
   | { type: "saved" }
   | {
@@ -30,6 +41,7 @@ export type CaptureResult =
       citations?: Citation[];
       cards?: HudCard[];
     }
+  | ClarificationResult
   | { type: "filtered"; reason: string };
 
 export type StreamEvent =

@@ -5,11 +5,28 @@ import type {
   ToolUseBlock,
 } from "@anthropic-ai/sdk/resources/messages";
 import { loadConfig } from "../config";
-import { conversationScratch, saveSession } from "../conversation";
+import {
+  appendTurn,
+  clearPendingClarification,
+  conversationScratch,
+  saveSession,
+  setPendingClarification,
+  type PendingClarification,
+} from "../conversation";
 import { ANTHROPIC_MODEL } from "../providers/anthropic";
 import { localContextBlock } from "../local-context";
 import type { Citation, HudCard, StreamEvent } from "../types";
 import { saveNote, searchNotes } from "./builtin";
+import {
+  clarificationLimitAnswer,
+  clarificationResumeBlock,
+  FOLLOW_UP_DETAIL_MAX_LENGTH,
+  FOLLOW_UP_QUESTION_MAX_LENGTH,
+  FOLLOW_UP_TOOL_NAME,
+  MAX_CLARIFICATION_ATTEMPTS,
+  nextClarificationAttempt,
+  parseStandaloneFollowUpCall,
+} from "./follow-up";
 import { clipToolText } from "./text";
 import { callGoogleTool } from "./google";
 import { callImessageTool } from "./imessage";
@@ -45,6 +62,35 @@ const BUILTIN: Tool[] = [
   },
 ];
 
+const ASK_FOLLOW_UP: Tool = {
+  name: FOLLOW_UP_TOOL_NAME,
+  description:
+    "Ask one focused follow-up question when a required search detail is missing, a reasonable search returned no results, or its results cannot be distinguished. Call this tool alone. Do not use it for connector, authentication, permission, or other tool failures.",
+  input_schema: {
+    type: "object",
+    properties: {
+      question: {
+        type: "string",
+        maxLength: FOLLOW_UP_QUESTION_MAX_LENGTH,
+        description:
+          "Exactly one short, discriminating question that names the specific choice or detail needed.",
+      },
+      missing_detail: {
+        type: "string",
+        maxLength: FOLLOW_UP_DETAIL_MAX_LENGTH,
+        description:
+          "A short description of the exact detail needed to resume the original request.",
+      },
+      reason: {
+        type: "string",
+        enum: ["missing_detail", "no_results", "ambiguous_results"],
+      },
+    },
+    required: ["question", "missing_detail", "reason"],
+    additionalProperties: false,
+  },
+};
+
 const SYSTEM = `You are Jarvis. British. Dry. Your words are spoken out loud, then shown as a short caption. People wake you by saying Jarvis.
 
 Rules:
@@ -52,14 +98,19 @@ Rules:
 - Warm but not ominous. No dossier tone. Don't spell codes or prices like a threat.
 - No preambles ("it looks like", "I can see that", "from my earlier search").
 - Never narrate tool use. Do not say you will search, try again, or look something up. The app already says "Checking." Then answer with what you found.
-- No offers ("would you like me to"). If something is missing, say so in one line.
+- No offers ("would you like me to"). If a request still cannot be completed after the allowed follow-ups, say so in one line.
 - Previous turns are this same conversation. Resolve pronouns (him, her, that, it) from that context. Do not ask who "him" is if the name is already in the thread.
 - You take actions, not only look things up. If they ask you to send, draft, reply, schedule, or create something, call the write tool. Do not save that request as an Omni note.
 - "Email myself" or "to myself" means send or draft to the connected Gmail account. If you need the address, take it from earlier mail results or the authenticated profile. If send fails, create a draft and say so.
 - Tasks: name, status, due date if it exists. Skip empty fields. Three or four items max, then a count of the rest.
 - Use tools for mail, calendar, Notion, messages, and Omni notes. Never invent those.
 - Mail search is only a list. If they ask what they bought, the price, or any detail missing from the snippet, open that message with get_email. Never say the body was cut off.
-- Prefer one tool call, then answer, unless the first result is a snippet. For iMessage, search_messages or get_conversation. Put the person in contact, not query. For today, set date_from only. Do not list groups first.`;
+- Prefer one tool call, then answer, unless the first result is a snippet. For iMessage, search_messages or get_conversation. Put the person in contact, not query. For today, set date_from only. Do not list groups first.
+- Search first whenever the request contains a reasonable query. Do not ask for optional filters before seeing whether that query works.
+- Use omni_ask_follow_up only when a key detail is truly required, a reasonable search returned no results, or several plausible results need one detail to distinguish them.
+- Ask exactly one short discriminating question. Name the concrete detail or alternatives; never ask a generic "could you clarify?" or "can you provide more information?" question.
+- Call omni_ask_follow_up by itself, with no prose and no other tool calls.
+- Never use omni_ask_follow_up for connector, authentication, permission, configuration, timeout, or tool execution failures. Briefly report the failure instead of asking the user to fix it.`;
 
 type ConnectorCapability =
   | "mail-search"
@@ -81,16 +132,20 @@ type Route = {
 export async function* runAgentStream(
   question: string,
   history: MessageParam[] = [],
-  traceId = "agent"
+  traceId = "agent",
+  pendingClarification?: PendingClarification,
+  signal?: AbortSignal
 ): AsyncGenerator<StreamEvent> {
+  if (signal?.aborted) return;
   const tag = `agent ${traceId}`;
   console.log(`[omni] ${tag} preparing`);
   yield { type: "log", text: `${tag} preparing` };
   const mcpTools = await getMcpTools();
   const n8nEnabled = loadConfig().n8n?.enabled === true;
   const n8nTools = n8nEnabled ? await getN8nTools() : [];
+  if (signal?.aborted) return;
   const routes = new Map<string, Route>();
-  const tools: Tool[] = [...BUILTIN];
+  const tools: Tool[] = [...BUILTIN, ASK_FOLLOW_UP];
   const googleFallbacks = buildGoogleFallbacks(mcpTools);
   const n8nCapabilities = new Set(
     n8nTools
@@ -138,6 +193,9 @@ export async function* runAgentStream(
   const system = [
     SYSTEM,
     localContextBlock(),
+    pendingClarification
+      ? clarificationResumeBlock(pendingClarification, question)
+      : "",
     scratch
       ? `Earlier findings from this conversation (use silently; do not read them aloud):\n${scratch}`
       : "",
@@ -152,25 +210,32 @@ export async function* runAgentStream(
     console.log(
       `[omni] ${tag} model turn=${i + 1} messages=${messages.length} tools=${tools.length}`
     );
-    const stream = client.messages.stream({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 500,
-      system,
-      tools,
-      messages,
-    });
+    const stream = client.messages.stream(
+      {
+        model: ANTHROPIC_MODEL,
+        max_tokens: 500,
+        system,
+        tools,
+        messages,
+      },
+      { signal }
+    );
 
     let turnText = "";
     let spokenOut = "";
     let toolTurn = false;
     let streamingLogged = false;
     for await (const event of stream) {
+      if (signal?.aborted) return;
       if (
         event.type === "content_block_start" &&
         event.content_block.type === "tool_use"
       ) {
         toolTurn = true;
-        if (!announced) {
+        if (
+          event.content_block.name !== FOLLOW_UP_TOOL_NAME &&
+          !announced
+        ) {
           announced = true;
           const name = event.content_block.name ?? "";
           yield { type: "token", text: fillerLine(name) };
@@ -195,6 +260,7 @@ export async function* runAgentStream(
     }
 
     const res = await stream.finalMessage();
+    if (signal?.aborted) return;
     console.log(
       `[omni] ${tag} model complete turn=${i + 1} stop=${res.stop_reason ?? "unknown"} blocks=${res.content.length} ${Date.now() - turnStarted}ms`
     );
@@ -215,8 +281,10 @@ export async function* runAgentStream(
       const response = spoken.trim();
       console.log(`[omni] ${tag} response ${JSON.stringify(response)}`);
       yield { type: "log", text: `${tag} response ${response}` };
+      if (signal?.aborted) return;
       messages.push({ role: "assistant", content: spoken.trim() });
       saveSession(messages);
+      clearPendingClarification();
       yield {
         type: "done",
         result: {
@@ -229,6 +297,94 @@ export async function* runAgentStream(
       return;
     }
 
+    if (toolUses.some((call) => call.name === FOLLOW_UP_TOOL_NAME)) {
+      const followUp = parseStandaloneFollowUpCall(toolUses);
+      if (!followUp) {
+        const line = `agent ${traceId} rejected invalid follow-up tool call ${brief(
+          toolUses[0]?.input
+        )}`;
+        console.warn(`[omni] ${line}`);
+        yield { type: "log", text: line };
+        messages.push({ role: "assistant", content: res.content });
+        messages.push({
+          role: "user",
+          content: toolUses.map((call) => ({
+            type: "tool_result" as const,
+            tool_use_id: call.id,
+            content:
+              call.name === FOLLOW_UP_TOOL_NAME
+                ? "Invalid follow-up. Call omni_ask_follow_up alone with one question, one missing_detail, and a valid reason."
+                : "Skipped because omni_ask_follow_up must be called alone. Retry the appropriate call.",
+          })),
+        });
+        continue;
+      }
+
+      const previousAttempts = pendingClarification?.attemptCount ?? 0;
+      const attemptCount = nextClarificationAttempt(previousAttempts);
+      if (attemptCount === null) {
+        const response = clarificationLimitAnswer(followUp.reason);
+        console.log(
+          `[omni] ${tag} clarification limit=${MAX_CLARIFICATION_ATTEMPTS}`
+        );
+        yield {
+          type: "log",
+          text: `${tag} clarification limit ${MAX_CLARIFICATION_ATTEMPTS}`,
+        };
+        yield { type: "token", text: response };
+        if (signal?.aborted) return;
+        messages.push({ role: "assistant", content: response });
+        saveSession(messages);
+        clearPendingClarification();
+        yield {
+          type: "done",
+          result: {
+            type: "answer",
+            text: response,
+            source: used.size > 0 ? "memory" : "general",
+            citations: citationsFrom(used),
+          },
+        };
+        return;
+      }
+
+      const originalRequest =
+        pendingClarification?.originalRequest ?? question.trim();
+      if (signal?.aborted) return;
+      if (used.size > 0) {
+        saveSession([
+          ...messages,
+          { role: "assistant", content: followUp.question },
+        ]);
+      } else {
+        appendTurn(question, followUp.question);
+      }
+      setPendingClarification({
+        originalRequest,
+        latestQuestion: followUp.question,
+        missingDetail: followUp.missingDetail,
+        attemptCount,
+      });
+      console.log(
+        `[omni] ${tag} clarification attempt=${attemptCount} reason=${followUp.reason}`
+      );
+      yield {
+        type: "log",
+        text: `${tag} clarification ${attemptCount}/${MAX_CLARIFICATION_ATTEMPTS} ${followUp.reason}`,
+      };
+      yield { type: "token", text: followUp.question };
+      yield {
+        type: "done",
+        result: {
+          type: "clarify",
+          question: followUp.question,
+          reason: followUp.reason,
+        },
+      };
+      return;
+    }
+
+    if (signal?.aborted) return;
     messages.push({ role: "assistant", content: res.content });
     for (const call of toolUses) {
       const label = toolLabel(call.name, routes);
@@ -238,6 +394,7 @@ export async function* runAgentStream(
     }
     const packed = await Promise.all(
       toolUses.map(async (call) => {
+        signal?.throwIfAborted();
         used.add(call.name);
         const started = Date.now();
         const content = await executeTool(
@@ -258,6 +415,7 @@ export async function* runAgentStream(
         };
       })
     );
+    if (signal?.aborted) return;
     for (const row of packed) {
       yield { type: "log", text: row.line };
       yield { type: "card", card: row.card };
@@ -276,8 +434,13 @@ export async function* runAgentStream(
   }
 
   const fallback = spoken.trim() || "That took too many steps.";
+  if (signal?.aborted) return;
   console.log(`[omni] ${tag} response ${JSON.stringify(fallback)}`);
   yield { type: "log", text: `${tag} response ${fallback}` };
+  if (signal?.aborted) return;
+  messages.push({ role: "assistant", content: fallback });
+  saveSession(messages);
+  clearPendingClarification();
   yield {
     type: "done",
     result: {

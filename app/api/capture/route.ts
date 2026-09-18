@@ -10,6 +10,14 @@ import type { StreamEvent } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+type ActiveCapture = { controller: AbortController | null };
+const globalCapture = globalThis as typeof globalThis & {
+  __omniActiveCapture?: ActiveCapture;
+};
+const activeCapture: ActiveCapture = (globalCapture.__omniActiveCapture ??= {
+  controller: null,
+});
+
 export async function POST(req: NextRequest) {
   const requestId = crypto.randomUUID().slice(0, 8);
   const started = Date.now();
@@ -37,6 +45,8 @@ export async function POST(req: NextRequest) {
   }
   if (reset) {
     console.log(`[omni] capture ${requestId} reset`);
+    activeCapture.controller?.abort("conversation reset");
+    activeCapture.controller = null;
     clearConversation();
   }
   if (warm) {
@@ -67,22 +77,32 @@ export async function POST(req: NextRequest) {
   }
 
   const input = text;
+  const captureController = new AbortController();
+  activeCapture.controller?.abort("superseded capture");
+  activeCapture.controller = captureController;
   console.log(`[omni] capture ${requestId} accepted ${JSON.stringify(input)}`);
   const encoder = new TextEncoder();
   let canceled = false;
   const onAbort = () => {
     canceled = true;
+    captureController.abort(req.signal.reason);
     console.warn(
       `[omni] capture ${requestId} client aborted ${Date.now() - started}ms`
     );
   };
   req.signal.addEventListener("abort", onAbort, { once: true });
+  if (req.signal.aborted) onAbort();
   const stream = new ReadableStream({
     async start(controller) {
       let events = 0;
       try {
-        for await (const event of handleCaptureStream(input, requestId)) {
-          if (canceled || req.signal.aborted) break;
+        for await (const event of handleCaptureStream(
+          input,
+          requestId,
+          {},
+          captureController.signal
+        )) {
+          if (canceled || captureController.signal.aborted) break;
           events += 1;
           console.log(
             `[omni] capture ${requestId} event ${describeEvent(event)}`
@@ -90,12 +110,12 @@ export async function POST(req: NextRequest) {
           try {
             controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
           } catch (err) {
-            if (canceled || req.signal.aborted) break;
+            if (canceled || captureController.signal.aborted) break;
             throw err;
           }
         }
       } catch (err) {
-        if (canceled || req.signal.aborted) return;
+        if (canceled || captureController.signal.aborted) return;
         const message =
           err instanceof Error ? err.message : "Something went wrong.";
         console.error(
@@ -114,6 +134,9 @@ export async function POST(req: NextRequest) {
         }
       } finally {
         req.signal.removeEventListener("abort", onAbort);
+        if (activeCapture.controller === captureController) {
+          activeCapture.controller = null;
+        }
         end("__omniCaptureBusy");
         try {
           controller.close();
@@ -127,6 +150,7 @@ export async function POST(req: NextRequest) {
     },
     cancel(reason) {
       canceled = true;
+      captureController.abort(reason);
       console.warn(
         `[omni] capture ${requestId} stream canceled ${Date.now() - started}ms`,
         reason ?? ""
@@ -150,7 +174,9 @@ function describeEvent(event: StreamEvent): string {
         ? event.result.text
         : event.result.type === "filtered"
           ? event.result.reason
-          : "saved";
+          : event.result.type === "clarify"
+            ? `${event.result.reason} ${event.result.question}`
+            : "saved";
     return `done.${event.result.type} ${JSON.stringify(text)}`;
   }
   if (event.type === "card") return `card ${JSON.stringify(event.card.title)}`;

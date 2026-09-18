@@ -15,10 +15,25 @@ export type ListenHandlers = {
   shouldIgnore?: () => boolean;
 };
 
+export type ReplyCaptureHandlers = {
+  signal?: AbortSignal;
+  onPartial?: (text: string) => void;
+  onStatus?: (text: string) => void;
+};
+
+export type SpeechCaptureGate = {
+  recording: boolean;
+  held: boolean;
+  speechHeld: boolean;
+  speaking: boolean;
+  voiceBusy: boolean;
+};
+
 type WakeState = {
   handlers: ListenHandlers | null;
   hooked: boolean;
   held: boolean;
+  speechHeld: boolean;
   recording: boolean;
   lastWake: number;
 };
@@ -28,12 +43,24 @@ const state: WakeState = (g.__omniWake ??= {
   handlers: null,
   hooked: false,
   held: false,
+  speechHeld: false,
   recording: false,
   lastWake: 0,
 });
+state.speechHeld ??= false;
 
 export function holdListen(on: boolean) {
   state.held = on;
+}
+
+export function canStartSpeechCapture(gate: SpeechCaptureGate): boolean {
+  return (
+    !gate.recording &&
+    !gate.held &&
+    !gate.speechHeld &&
+    !gate.speaking &&
+    !gate.voiceBusy
+  );
 }
 
 export function startWakeListener(next: ListenHandlers): () => void {
@@ -41,16 +68,20 @@ export function startWakeListener(next: ListenHandlers): () => void {
   if (!state.hooked) {
     state.hooked = true;
     onSpeaking((on) => {
-      holdListen(on);
+      state.speechHeld = on;
     });
     void startLocalWake();
   }
-  return () => {};
+  return () => {
+    if (state.handlers === next) state.handlers = null;
+  };
 }
 
 function busy() {
   return (
+    !state.handlers ||
     state.held ||
+    state.speechHeld ||
     state.recording ||
     isSpeaking() ||
     isVoiceBusy() ||
@@ -113,47 +144,72 @@ async function startLocalWake() {
 }
 
 async function captureFollowUp(model: { reset: () => void }) {
-  if (state.recording || state.held) return;
-  state.recording = true;
-  state.handlers?.onWake();
-  const scribe = createScribeSession({
-    onPartial: (text) => {
-      const command = commandAfterWake(text) ?? text;
-      if (command) state.handlers?.onPartial?.(command);
-    },
-  });
   try {
-    const pcm = await collectUtterance({
+    const result = await captureSpeech({
+      label: "wake",
       waitMs: WAIT_FOR_SPEECH_MS,
-      onSpeech: () => scribe.connect(),
-      onFrame: (frame) => scribe.send(frame),
+      normalize: commandAfterWake,
+      onStart: () => state.handlers?.onWake(),
+      onPartial: (text) => state.handlers?.onPartial?.(text),
+      onTranscribing: () => state.handlers?.onStatus?.("Transcribing…"),
     });
-    if (!pcm) {
-      scribe.close();
+    if (result.type === "empty") {
       hangUp("listen timed out");
       return;
     }
-    state.handlers?.onStatus?.("Transcribing…");
-    console.log("[omni] transcribe start");
-    const live = await scribe.finish();
-    const spoken = (live || (await whisper(pcm))).trim();
-    console.log("[omni] transcribe", spoken || "(empty)", live ? "scribe" : "whisper");
-    const command = commandAfterWake(spoken);
-    if (!command) {
-      hangUp("listen empty");
+    if (result.type === "error") {
+      console.warn(
+        "[omni] listen:",
+        result.error instanceof Error ? result.error.message : result.error
+      );
+      state.handlers?.onStatus?.("Mic didn't work. Type instead.");
+      state.handlers?.onIdle?.();
       return;
     }
-    console.log("[omni] heard", command);
-    state.handlers?.onCommand(command);
-    scribe.close();
-  } catch (err) {
-    console.warn("[omni] listen:", err instanceof Error ? err.message : err);
-    state.handlers?.onStatus?.("Mic didn't work. Type instead.");
+    if (result.type !== "heard") return;
+    console.log("[omni] heard", result.text);
+    state.handlers?.onCommand(result.text);
   } finally {
-    state.recording = false;
     model.reset();
     state.lastWake = Date.now();
   }
+}
+
+export const REPLY_SPEECH_START_MS = 8000;
+
+/**
+ * Capture one conversational reply without requiring or removing the wake word.
+ * The caller should invoke this only after TTS has fully drained.
+ */
+export async function captureReply(
+  handlers: ReplyCaptureHandlers = {}
+): Promise<string | null> {
+  const result = await captureSpeech({
+    label: "reply",
+    waitMs: REPLY_SPEECH_START_MS,
+    signal: handlers.signal,
+    normalize: normalizeReplyTranscript,
+    onStart: () => handlers.onStatus?.("Listening…"),
+    onPartial: handlers.onPartial,
+    onTranscribing: () => handlers.onStatus?.("Transcribing reply…"),
+  });
+
+  if (result.type === "heard") {
+    console.log("[omni] heard reply", result.text);
+    return result.text;
+  }
+  if (result.type === "empty") {
+    handlers.onStatus?.("Reply timed out. Say Jarvis to continue.");
+    state.handlers?.onIdle?.();
+  } else if (result.type === "error") {
+    console.warn(
+      "[omni] reply listen:",
+      result.error instanceof Error ? result.error.message : result.error
+    );
+    handlers.onStatus?.("Reply mic didn't work. Say Jarvis or type instead.");
+    state.handlers?.onIdle?.();
+  }
+  return null;
 }
 
 function hangUp(reason: string) {
@@ -162,11 +218,124 @@ function hangUp(reason: string) {
   state.handlers?.onIdle?.();
 }
 
-async function whisper(pcm: Float32Array): Promise<string> {
+type SpeechCaptureResult =
+  | { type: "heard"; text: string }
+  | { type: "empty" | "blocked" | "canceled" }
+  | { type: "error"; error: unknown };
+
+async function captureSpeech(opts: {
+  label: "wake" | "reply";
+  waitMs: number;
+  normalize: (text: string) => string | undefined;
+  signal?: AbortSignal;
+  onStart?: () => void;
+  onPartial?: (text: string) => void;
+  onTranscribing?: () => void;
+}): Promise<SpeechCaptureResult> {
+  if (opts.signal?.aborted) return { type: "canceled" };
+  if (
+    !canStartSpeechCapture({
+      recording: state.recording,
+      held: state.held,
+      speechHeld: state.speechHeld,
+      speaking: isSpeaking(),
+      voiceBusy: isVoiceBusy(),
+    })
+  ) {
+    console.log(`[omni] ${opts.label} listen blocked`);
+    return { type: "blocked" };
+  }
+
+  state.recording = true;
+  opts.onStart?.();
+  const scribe = createScribeSession({
+    onPartial: (text) => {
+      const normalized = opts.normalize(text);
+      if (normalized) opts.onPartial?.(normalized);
+    },
+  });
+  const cancelScribe = () => scribe.close();
+  opts.signal?.addEventListener("abort", cancelScribe, { once: true });
+
+  try {
+    const pcm = await collectUtterance({
+      waitMs: opts.waitMs,
+      signal: opts.signal,
+      onSpeech: () => scribe.connect(),
+      onFrame: (frame) => scribe.send(frame),
+    });
+    if (opts.signal?.aborted) return { type: "canceled" };
+    if (!pcm) return { type: "empty" };
+
+    opts.onTranscribing?.();
+    console.log(`[omni] ${opts.label} transcribe start`);
+    const live = await withAbort(scribe.finish(), opts.signal);
+    if (opts.signal?.aborted) return { type: "canceled" };
+    const fallback = live ? "" : await whisper(pcm, opts.signal);
+    if (opts.signal?.aborted) return { type: "canceled" };
+    const raw = (live || fallback).trim();
+    const text = opts.normalize(raw);
+    console.log(
+      `[omni] ${opts.label} transcribe`,
+      text || "(empty)",
+      live ? "scribe" : "whisper"
+    );
+    return text ? { type: "heard", text } : { type: "empty" };
+  } catch (error) {
+    if (opts.signal?.aborted || isAbortError(error)) {
+      return { type: "canceled" };
+    }
+    return { type: "error", error };
+  } finally {
+    opts.signal?.removeEventListener("abort", cancelScribe);
+    scribe.close();
+    state.recording = false;
+    if (opts.label === "wake") state.lastWake = Date.now();
+  }
+}
+
+export function normalizeReplyTranscript(text: string): string | undefined {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized || undefined;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function withAbort<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return pending;
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    pending.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+async function whisper(
+  pcm: Float32Array,
+  signal?: AbortSignal
+): Promise<string> {
   const res = await fetch("/api/transcribe", {
     method: "POST",
     headers: { "Content-Type": "audio/wav" },
     body: pcmToWav(pcm),
+    signal,
   });
   const data = (await res.json().catch(() => ({}))) as { text?: string };
   return (data.text ?? "").trim();
@@ -181,11 +350,13 @@ const MIN_SAMPLES = 3200;
 
 async function collectUtterance(opts?: {
   waitMs?: number;
-  idle?: boolean;
+  signal?: AbortSignal;
   onSpeech?: () => void;
   onFrame?: (frame: Float32Array) => void;
 }): Promise<Float32Array | null> {
-  const tap = await getMicTap();
+  if (opts?.signal?.aborted) return null;
+  const tap = await withAbort(getMicTap(), opts?.signal);
+  if (opts?.signal?.aborted) return null;
   const chunks: Float32Array[] = [];
   let peaked = false;
   let hot = 0;
@@ -197,15 +368,25 @@ async function collectUtterance(opts?: {
 
   return new Promise((resolve) => {
     let done = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let unsub = () => {};
+    const onAbort = () => finish(null);
     const finish = (pcm: Float32Array | null) => {
       if (done) return;
       done = true;
+      if (timer) clearTimeout(timer);
+      opts?.signal?.removeEventListener("abort", onAbort);
       unsub();
       resolve(pcm);
     };
-    const unsub = tap.subscribe((frame) => {
+    unsub = tap.subscribe((frame) => {
       if (done) return;
-      if (state.held || isSpeaking() || (opts?.idle && state.recording)) {
+      if (
+        state.held ||
+        state.speechHeld ||
+        isSpeaking() ||
+        isVoiceBusy()
+      ) {
         finish(null);
         return;
       }
@@ -218,6 +399,10 @@ async function collectUtterance(opts?: {
         if (!peaked && hot >= SPEECH_FRAMES) {
           peaked = true;
           speechAt = now;
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
           opts?.onSpeech?.();
         }
         if (peaked) {
@@ -254,5 +439,16 @@ async function collectUtterance(opts?: {
         finish(out);
       }
     });
+    opts?.signal?.addEventListener("abort", onAbort, { once: true });
+    if (opts?.signal?.aborted) {
+      finish(null);
+      return;
+    }
+    if (waitMs > 0) {
+      timer = setTimeout(() => {
+        console.log("[omni] listen idle", "peak rms", maxRms.toFixed(4));
+        finish(null);
+      }, waitMs);
+    }
   });
 }

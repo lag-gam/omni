@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getAnalyser, onSpeaking } from "@/lib/speech";
 
-export function VoiceViz() {
+export function VoiceViz({ onInterrupt }: { onInterrupt?: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [speaking, setSpeaking] = useState(false);
 
   useEffect(() => {
     const surface = canvasRef.current;
@@ -17,13 +18,14 @@ export function VoiceViz() {
     const reduced = window.matchMedia(
       "(prefers-reduced-motion: reduce)"
     ).matches;
-    let speaking = false;
+    let live = false;
     let frame = 0;
     let raf = 0;
     const bins = new Uint8Array(128);
 
     const stopListen = onSpeaking((on) => {
-      speaking = on;
+      live = on;
+      setSpeaking(on);
     });
 
     const resize = () => {
@@ -41,7 +43,7 @@ export function VoiceViz() {
       brush.clearRect(0, 0, w, h);
 
       const analyser = getAnalyser();
-      if (analyser && speaking && !reduced) {
+      if (analyser && live && !reduced) {
         analyser.getByteFrequencyData(bins);
       } else {
         bins.fill(0);
@@ -58,9 +60,9 @@ export function VoiceViz() {
       for (let i = 0; i < usable; i++) {
         const t = i / (usable - 1);
         const x = t * w;
-        const raw = speaking && !reduced ? bins[i] / 255 : 0;
+        const raw = live && !reduced ? bins[i] / 255 : 0;
         const idle = reduced ? 0 : Math.sin(frame / 28 + i * 0.18) * 1.4;
-        const amp = speaking ? raw * (h * 0.42) : idle;
+        const amp = live ? raw * (h * 0.42) : idle;
         const y = mid - amp;
         if (i === 0) brush.moveTo(x, y);
         else brush.lineTo(x, y);
@@ -81,5 +83,28 @@ export function VoiceViz() {
     };
   }, []);
 
-  return <canvas ref={canvasRef} className="h-12 w-full" aria-hidden="true" />;
+  const canInterrupt = Boolean(onInterrupt) && speaking;
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!canInterrupt) return;
+        onInterrupt?.();
+      }}
+      className={`h-12 w-full rounded-md bg-transparent p-0 ${
+        canInterrupt ? "cursor-pointer" : "cursor-default"
+      }`}
+      aria-label={
+        canInterrupt ? "Interrupt Jarvis and speak" : "Jarvis voice"
+      }
+      title={canInterrupt ? "Tap to interrupt" : undefined}
+    >
+      <canvas
+        ref={canvasRef}
+        className="pointer-events-none h-12 w-full"
+        aria-hidden="true"
+      />
+    </button>
+  );
 }
